@@ -1,15 +1,56 @@
 # TYPO3 to Confluence Exporter
 
-A Laravel console application that connects to a TYPO3 MySQL database, reads all pages and file attachments, and exports them as a Confluence HTML export ZIP file. The export matches the format produced by Confluence's "Space Tools > Content Tools > Export" (HTML export) and can be imported into tools like the Intravox Nextcloud extension.
+A CLI tool that connects to a TYPO3 MySQL database, reads all pages and file attachments, and exports them as a Confluence HTML export ZIP file. The export matches the format produced by Confluence's "Space Tools > Content Tools > Export" (HTML export) and can be imported into tools like the Intravox Nextcloud extension.
 
-## Requirements
+## Quick Start (PHAR)
 
-- PHP 8.2+
-- Composer
-- Access to the TYPO3 MySQL database
-- Access to the TYPO3 `fileadmin/` directory (for attachments)
+Copy the pre-built `typo3-to-confluence.phar` to the TYPO3 server and run:
 
-## Installation
+```bash
+php typo3-to-confluence.phar \
+  --db-host=127.0.0.1 \
+  --db-name=typo3 \
+  --db-user=root \
+  --db-password=secret \
+  --fileadmin=/var/www/html/fileadmin \
+  --output=/tmp
+```
+
+The PHAR requires PHP 8.2+ with the `pdo_mysql` and `zlib` extensions.
+
+Alternatively, create a `.env` file in the same directory as the PHAR:
+
+```env
+TYPO3_DB_HOST=127.0.0.1
+TYPO3_DB_PORT=3306
+TYPO3_DB_DATABASE=typo3
+TYPO3_DB_USERNAME=root
+TYPO3_DB_PASSWORD=secret
+TYPO3_FILEADMIN_PATH=/var/www/html/fileadmin
+```
+
+Then run without flags:
+
+```bash
+php typo3-to-confluence.phar --output=/tmp
+```
+
+## Building the PHAR
+
+```bash
+composer install
+composer build
+```
+
+The PHAR is written to `builds/typo3-to-confluence.phar`.
+
+Note: building requires `phar.readonly=0` in your php.ini, or run the build step with:
+
+```bash
+php -d phar.readonly=0 vendor/bin/box compile
+```
+
+## Development Usage
 
 ```bash
 composer install
@@ -17,66 +58,34 @@ cp .env.example .env
 php artisan key:generate
 ```
 
-## Configuration
-
-Edit your `.env` file with the TYPO3 database credentials:
-
-```env
-TYPO3_DB_HOST=127.0.0.1
-TYPO3_DB_PORT=3306
-TYPO3_DB_DATABASE=typo3
-TYPO3_DB_USERNAME=root
-TYPO3_DB_PASSWORD=
-
-# Absolute path to the TYPO3 fileadmin directory
-TYPO3_FILEADMIN_PATH=/var/www/html/fileadmin
-```
-
-## Usage
+Edit `.env` with your TYPO3 database credentials, then:
 
 ```bash
 php artisan app:export-typo3-to-confluence
 ```
 
-### Options
+## Options
 
 | Option | Default | Description |
 |---|---|---|
-| `--output` | `storage/app` | Directory where the ZIP file will be saved |
+| `--output` | `.` (current dir) | Directory where the ZIP file will be saved |
 | `--fileadmin` | Value from `TYPO3_FILEADMIN_PATH` | Path to the TYPO3 `fileadmin/` directory |
 | `--space-name` | `Intranet` | Name shown in the export header |
-| `--root-pid` | `0` | TYPO3 root page UID to start the export from (0 = all pages) |
+| `--root-pid` | `0` | TYPO3 root page UID to start from (0 = all pages) |
 | `--include-hidden` | `false` | Also export hidden TYPO3 pages |
-
-### Examples
-
-Export all visible pages:
-
-```bash
-php artisan app:export-typo3-to-confluence --fileadmin=/var/www/html/fileadmin
-```
-
-Export a specific page tree starting from page UID 1:
-
-```bash
-php artisan app:export-typo3-to-confluence --root-pid=1 --fileadmin=/var/www/html/fileadmin
-```
-
-Export including hidden pages to a custom directory:
-
-```bash
-php artisan app:export-typo3-to-confluence --include-hidden --output=/tmp/export
-```
+| `--db-host` | from `.env` | TYPO3 database host |
+| `--db-port` | `3306` | TYPO3 database port |
+| `--db-name` | from `.env` | TYPO3 database name |
+| `--db-user` | from `.env` | TYPO3 database username |
+| `--db-password` | from `.env` | TYPO3 database password |
 
 ## What Gets Exported
 
-- **Pages** - The full page tree hierarchy from the TYPO3 `pages` table (excluding system pages like folders, recycler, etc.)
-- **Content** - All `tt_content` records per page, assembled into HTML with headers and body text
-- **Attachments** - Files referenced via `sys_file_reference` from both `tt_content` and `pages` records
+- **Pages** - The full page tree from the TYPO3 `pages` table (excluding system pages)
+- **Content** - All `tt_content` records per page, assembled into HTML
+- **Attachments** - Files referenced via `sys_file_reference` from `tt_content` and `pages`
 
 ## Output Format
-
-The command produces a `confluence-export.zip` matching the Confluence HTML export format:
 
 ```
 confluence-export.zip
@@ -85,16 +94,11 @@ confluence-export.zip
 ├── another-page.html
 ├── attachments/
 │   └── page-title/
-│       ├── document.pdf    # Attachment files per page
+│       ├── document.pdf
 │       └── image.png
 └── styles/
     └── site.css
 ```
-
-Each page is a standalone HTML file with:
-- Breadcrumb navigation
-- Page content converted from TYPO3 `tt_content`
-- Attachment list with links to files
 
 ## TYPO3 Tables Used
 

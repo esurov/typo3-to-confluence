@@ -9,6 +9,7 @@
         "laravel/framework": "^12.0"
     },
     "require-dev": {
+        "humbug/box": "^4.0",
         "laravel/pint": "^1.24"
     },
     "autoload": {
@@ -21,6 +22,12 @@
             "composer install",
             "@php -r \"file_exists('.env') || copy('.env.example', '.env');\"",
             "@php artisan key:generate"
+        ],
+        "build": [
+            "@php -r \"is_dir('builds') || mkdir('builds');\"",
+            "@composer install --no-dev --optimize-autoloader",
+            "@php -d phar.readonly=0 vendor/bin/box compile",
+            "@composer install"
         ],
         "post-autoload-dump": [
             "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",

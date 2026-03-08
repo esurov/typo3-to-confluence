@@ -9,18 +9,23 @@ use Illuminate\Support\Facades\DB;
 class ExportTypo3ToConfluence extends Command
 {
     protected $signature = 'app:export-typo3-to-confluence
-        {--output= : Output directory for the ZIP file (defaults to storage/app)}
+        {--output=. : Output directory for the ZIP file (defaults to current directory)}
         {--space-name=Intranet : Space name used in the export}
         {--fileadmin= : Path to TYPO3 fileadmin directory}
         {--include-hidden : Include hidden pages}
-        {--root-pid=0 : Root page ID to start export from}';
+        {--root-pid=0 : Root page ID to start export from}
+        {--db-host= : TYPO3 database host (overrides .env)}
+        {--db-port=3306 : TYPO3 database port}
+        {--db-name= : TYPO3 database name (overrides .env)}
+        {--db-user= : TYPO3 database username (overrides .env)}
+        {--db-password= : TYPO3 database password (overrides .env)}';
 
     protected $description = 'Export TYPO3 pages and attachments to a Confluence HTML export ZIP';
 
     public function handle(): int
     {
-        $outputPath = $this->option('output') ?: storage_path('app');
-        $fileadminPath = $this->option('fileadmin') ?: config('app.typo3_fileadmin_path', env('TYPO3_FILEADMIN_PATH', ''));
+        $outputPath = $this->option('output') ?: getcwd();
+        $fileadminPath = $this->option('fileadmin') ?: env('TYPO3_FILEADMIN_PATH', '');
         $spaceName = $this->option('space-name');
         $includeHidden = $this->option('include-hidden');
         $rootPid = (int) $this->option('root-pid');
@@ -30,6 +35,8 @@ class ExportTypo3ToConfluence extends Command
 
             return self::FAILURE;
         }
+
+        $this->applyDatabaseOverrides();
 
         $this->info('Connecting to TYPO3 database...');
 
@@ -287,6 +294,25 @@ class ExportTypo3ToConfluence extends Command
         }
 
         return $attachments;
+    }
+
+    private function applyDatabaseOverrides(): void
+    {
+        $overrides = array_filter([
+            'host' => $this->option('db-host'),
+            'port' => $this->option('db-port') !== '3306' ? $this->option('db-port') : null,
+            'database' => $this->option('db-name'),
+            'username' => $this->option('db-user'),
+            'password' => $this->option('db-password'),
+        ], fn ($v) => $v !== null);
+
+        foreach ($overrides as $key => $value) {
+            config(["database.connections.typo3.{$key}" => $value]);
+        }
+
+        if (! empty($overrides)) {
+            DB::purge('typo3');
+        }
     }
 
     private function resolveFilePath(object $file, string $fileadminPath): string
