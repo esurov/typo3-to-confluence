@@ -1,6 +1,6 @@
 # TYPO3 to Confluence Exporter
 
-A Laravel console application that connects to a TYPO3 MySQL database, reads all pages and file attachments, and exports them as a Confluence-compatible ZIP file. The export can be imported into tools that support the Confluence export format, such as the Intravox Nextcloud extension.
+A Laravel console application that connects to a TYPO3 MySQL database, reads all pages and file attachments, and exports them as a Confluence HTML export ZIP file. The export matches the format produced by Confluence's "Space Tools > Content Tools > Export" (HTML export) and can be imported into tools like the Intravox Nextcloud extension.
 
 ## Requirements
 
@@ -44,10 +44,9 @@ php artisan app:export-typo3-to-confluence
 |---|---|---|
 | `--output` | `storage/app` | Directory where the ZIP file will be saved |
 | `--fileadmin` | Value from `TYPO3_FILEADMIN_PATH` | Path to the TYPO3 `fileadmin/` directory |
-| `--space-key` | `INTRANET` | Confluence space key |
-| `--space-name` | `Intranet` | Confluence space name |
+| `--space-name` | `Intranet` | Name shown in the export header |
 | `--root-pid` | `0` | TYPO3 root page UID to start the export from (0 = all pages) |
-| `--include-hidden` | `false` | Include hidden TYPO3 pages in the export |
+| `--include-hidden` | `false` | Also export hidden TYPO3 pages |
 
 ### Examples
 
@@ -72,15 +71,30 @@ php artisan app:export-typo3-to-confluence --include-hidden --output=/tmp/export
 ## What Gets Exported
 
 - **Pages** - The full page tree hierarchy from the TYPO3 `pages` table (excluding system pages like folders, recycler, etc.)
-- **Content** - All `tt_content` records for each page, assembled into HTML with headers and body text
+- **Content** - All `tt_content` records per page, assembled into HTML with headers and body text
 - **Attachments** - Files referenced via `sys_file_reference` from both `tt_content` and `pages` records
 
 ## Output Format
 
-The command produces a `confluence-export.zip` containing:
+The command produces a `confluence-export.zip` matching the Confluence HTML export format:
 
-- `entities.xml` - Confluence Hibernate-style XML with Space, Page, BodyContent, and Attachment objects
-- `attachments/` - Directory with the actual attachment files, organized by page and attachment ID
+```
+confluence-export.zip
+├── index.html              # Page tree / table of contents
+├── page-title.html         # Individual page HTML files
+├── another-page.html
+├── attachments/
+│   └── page-title/
+│       ├── document.pdf    # Attachment files per page
+│       └── image.png
+└── styles/
+    └── site.css
+```
+
+Each page is a standalone HTML file with:
+- Breadcrumb navigation
+- Page content converted from TYPO3 `tt_content`
+- Attachment list with links to files
 
 ## TYPO3 Tables Used
 

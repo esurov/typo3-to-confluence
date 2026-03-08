@@ -2,67 +2,47 @@
 
 namespace App\Services;
 
-use DOMDocument;
-use DOMElement;
+use Illuminate\Support\Str;
 use ZipArchive;
 
 class ConfluenceExportBuilder
 {
-    private DOMDocument $doc;
-
-    private DOMElement $root;
-
-    private int $objectId = 1;
-
-    private string $spaceKey;
-
     private string $spaceName;
 
-    private int $spaceId;
-
-    /** @var array<int, array{id: int, title: string, parentId: int|null, position: int}> */
+    /** @var array<int, array{title: string, parentId: int|null, position: int, slug: string}> */
     private array $pages = [];
 
     /** @var array<int, string> */
     private array $bodyContents = [];
 
-    /** @var array<int, list<array{id: int, fileName: string, fileSize: int, mediaType: string, filePath: string}>> */
+    /** @var array<int, list<array{fileName: string, fileSize: int, mediaType: string, filePath: string}>> */
     private array $attachments = [];
 
-    public function __construct(string $spaceKey = 'INTRANET', string $spaceName = 'Intranet')
+    /** @var array<string, int> Track slug usage to avoid duplicates */
+    private array $slugCounts = [];
+
+    public function __construct(string $spaceName = 'Intranet')
     {
-        $this->spaceKey = $spaceKey;
         $this->spaceName = $spaceName;
-        $this->spaceId = $this->nextId();
-
-        $this->doc = new DOMDocument('1.0', 'UTF-8');
-        $this->doc->formatOutput = true;
-
-        $this->root = $this->doc->createElement('hibernate-generic');
-        $this->root->setAttribute('datetime', now()->format('Y-m-d H:i:s'));
-        $this->doc->appendChild($this->root);
     }
 
-    public function addPage(int $typo3Uid, string $title, ?int $parentTypo3Uid, int $position, string $bodyHtml): int
+    public function addPage(int $typo3Uid, string $title, ?int $parentTypo3Uid, int $position, string $bodyHtml): void
     {
-        $pageId = $this->nextId();
+        $slug = $this->generateUniqueSlug($title, $typo3Uid);
 
         $this->pages[$typo3Uid] = [
-            'id' => $pageId,
             'title' => $title,
             'parentId' => $parentTypo3Uid,
             'position' => $position,
+            'slug' => $slug,
         ];
 
         $this->bodyContents[$typo3Uid] = $bodyHtml;
-
-        return $pageId;
     }
 
     public function addAttachment(int $pageTypo3Uid, string $fileName, int $fileSize, string $mediaType, string $filePath): void
     {
         $this->attachments[$pageTypo3Uid][] = [
-            'id' => $this->nextId(),
             'fileName' => $fileName,
             'fileSize' => $fileSize,
             'mediaType' => $mediaType,
@@ -72,22 +52,6 @@ class ConfluenceExportBuilder
 
     public function build(string $outputPath): string
     {
-        $this->buildSpaceObject();
-        $this->buildSpaceDescription();
-
-        foreach ($this->pages as $typo3Uid => $page) {
-            $this->buildPageObject($typo3Uid, $page);
-            $this->buildBodyContent($typo3Uid);
-
-            if (isset($this->attachments[$typo3Uid])) {
-                foreach ($this->attachments[$typo3Uid] as $attachment) {
-                    $this->buildAttachmentObject($typo3Uid, $attachment);
-                }
-            }
-        }
-
-        $xmlContent = $this->doc->saveXML();
-
         $zip = new ZipArchive;
         $zipPath = rtrim($outputPath, '/').'/confluence-export.zip';
 
@@ -95,205 +59,222 @@ class ConfluenceExportBuilder
             throw new \RuntimeException("Cannot create ZIP file at: {$zipPath}");
         }
 
-        $zip->addFromString('entities.xml', $xmlContent);
+        // Build index.html (page tree / table of contents)
+        $zip->addFromString('index.html', $this->buildIndexHtml());
 
-        foreach ($this->attachments as $typo3Uid => $pageAttachments) {
-            $pageId = $this->pages[$typo3Uid]['id'];
-            foreach ($pageAttachments as $attachment) {
-                if (file_exists($attachment['filePath'])) {
-                    $version = 1;
-                    $attachmentDir = "attachments/{$pageId}/{$attachment['id']}";
-                    $zip->addFile($attachment['filePath'], "{$attachmentDir}/{$version}");
+        // Build individual page HTML files and collect attachments
+        foreach ($this->pages as $typo3Uid => $page) {
+            $pageHtml = $this->buildPageHtml($typo3Uid, $page);
+            $zip->addFromString($page['slug'].'.html', $pageHtml);
+
+            // Add attachments for this page
+            if (isset($this->attachments[$typo3Uid])) {
+                foreach ($this->attachments[$typo3Uid] as $attachment) {
+                    $attachmentZipPath = 'attachments/'.$page['slug'].'/'.$attachment['fileName'];
+                    if (file_exists($attachment['filePath'])) {
+                        $zip->addFile($attachment['filePath'], $attachmentZipPath);
+                    }
                 }
             }
         }
+
+        // Add a basic stylesheet
+        $zip->addFromString('styles/site.css', $this->buildCss());
 
         $zip->close();
 
         return $zipPath;
     }
 
-    private function buildSpaceObject(): void
+    private function buildIndexHtml(): string
     {
-        $object = $this->createObject('Space', $this->spaceId);
+        $tree = $this->buildPageTreeHtml();
 
-        $this->addProperty($object, 'key', $this->spaceKey);
-        $this->addProperty($object, 'name', $this->spaceName);
-        $this->addProperty($object, 'spaceType', 'global', 'SpaceType');
-
-        $homePage = $this->findHomePage();
-        if ($homePage !== null) {
-            $this->addIdProperty($object, 'homePage', $homePage['id'], 'Page');
-        }
+        return <<<HTML
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>{$this->escape($this->spaceName)}</title>
+            <link rel="stylesheet" type="text/css" href="styles/site.css">
+        </head>
+        <body>
+            <div id="main-header">
+                <h1>{$this->escape($this->spaceName)}</h1>
+            </div>
+            <div id="content">
+                <h2>Pages</h2>
+                {$tree}
+            </div>
+        </body>
+        </html>
+        HTML;
     }
 
-    private function buildSpaceDescription(): void
+    private function buildPageTreeHtml(): string
     {
-        $descId = $this->nextId();
-        $object = $this->createObject('SpaceDescription', $descId);
+        // Find root pages (no parent or parent not in our set)
+        $rootPages = [];
+        foreach ($this->pages as $uid => $page) {
+            if ($page['parentId'] === null || ! isset($this->pages[$page['parentId']])) {
+                $rootPages[$uid] = $page;
+            }
+        }
 
-        $this->addProperty($object, 'status', 'current');
-        $this->addIdProperty($object, 'space', $this->spaceId, 'Space');
+        // Sort by position
+        uasort($rootPages, fn ($a, $b) => $a['position'] <=> $b['position']);
 
-        $bodyId = $this->nextId();
-        $bodyObject = $this->createObject('BodyContent', $bodyId);
-        $this->addProperty($bodyObject, 'body', $this->spaceName);
-        $this->addProperty($bodyObject, 'bodyType', '0', 'int');
-        $this->addIdProperty($bodyObject, 'content', $descId, 'SpaceDescription');
+        return $this->buildTreeList($rootPages);
     }
 
     /**
-     * @param  array{id: int, title: string, parentId: int|null, position: int}  $page
+     * @param  array<int, array{title: string, parentId: int|null, position: int, slug: string}>  $pages
      */
-    private function buildPageObject(int $typo3Uid, array $page): void
+    private function buildTreeList(array $pages): string
     {
-        $object = $this->createObject('Page', $page['id']);
-
-        $this->addProperty($object, 'title', $page['title']);
-        $this->addProperty($object, 'status', 'current');
-        $this->addProperty($object, 'position', (string) $page['position'], 'int');
-        $this->addProperty($object, 'version', '1', 'int');
-        $this->addProperty($object, 'creationDate', now()->format('Y-m-d H:i:s.v'));
-        $this->addProperty($object, 'lastModificationDate', now()->format('Y-m-d H:i:s.v'));
-
-        $this->addIdProperty($object, 'space', $this->spaceId, 'Space');
-
-        if ($page['parentId'] !== null && isset($this->pages[$page['parentId']])) {
-            $this->addIdProperty($object, 'parent', $this->pages[$page['parentId']]['id'], 'Page');
+        if (empty($pages)) {
+            return '';
         }
 
-        // Children collection
-        $children = array_filter($this->pages, fn ($p) => $p['parentId'] === $typo3Uid);
-        if (! empty($children)) {
-            $collectionEl = $this->doc->createElement('collection');
-            $collectionEl->setAttribute('name', 'children');
-            $collectionEl->setAttribute('class', 'java.util.ArrayList');
-            foreach ($children as $child) {
-                $this->addCollectionElement($collectionEl, 'Page', $child['id']);
+        $html = "<ul>\n";
+        foreach ($pages as $uid => $page) {
+            $html .= '<li><a href="'.$this->escape($page['slug']).'.html">'.$this->escape($page['title'])."</a>\n";
+
+            // Find children
+            $children = array_filter($this->pages, fn ($p) => $p['parentId'] === $uid);
+            uasort($children, fn ($a, $b) => $a['position'] <=> $b['position']);
+
+            if (! empty($children)) {
+                $html .= $this->buildTreeList($children);
             }
-            $object->appendChild($collectionEl);
-        }
 
-        // Attachments collection
-        if (isset($this->attachments[$typo3Uid])) {
-            $collectionEl = $this->doc->createElement('collection');
-            $collectionEl->setAttribute('name', 'attachments');
-            $collectionEl->setAttribute('class', 'java.util.ArrayList');
-            foreach ($this->attachments[$typo3Uid] as $attachment) {
-                $this->addCollectionElement($collectionEl, 'Attachment', $attachment['id']);
-            }
-            $object->appendChild($collectionEl);
+            $html .= "</li>\n";
         }
+        $html .= "</ul>\n";
+
+        return $html;
     }
 
-    private function buildBodyContent(int $typo3Uid): void
+    /**
+     * @param  array{title: string, parentId: int|null, position: int, slug: string}  $page
+     */
+    private function buildPageHtml(int $typo3Uid, array $page): string
     {
-        $bodyId = $this->nextId();
-        $object = $this->createObject('BodyContent', $bodyId);
-
+        $title = $this->escape($page['title']);
         $body = $this->bodyContents[$typo3Uid] ?? '';
-        $this->addProperty($object, 'body', $body);
-        $this->addProperty($object, 'bodyType', '0', 'int');
-        $this->addIdProperty($object, 'content', $this->pages[$typo3Uid]['id'], 'Page');
+
+        // Build breadcrumb
+        $breadcrumb = $this->buildBreadcrumb($typo3Uid);
+
+        // Build attachment list
+        $attachmentHtml = $this->buildAttachmentListHtml($typo3Uid, $page['slug']);
+
+        return <<<HTML
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>{$title}</title>
+            <link rel="stylesheet" type="text/css" href="styles/site.css">
+        </head>
+        <body>
+            <div id="main-header">
+                <h1><a href="index.html">{$this->escape($this->spaceName)}</a></h1>
+            </div>
+            <div id="breadcrumb-section">
+                {$breadcrumb}
+            </div>
+            <div id="content">
+                <div id="main-content" class="wiki-content">
+                    <h1>{$title}</h1>
+                    {$body}
+                </div>
+                {$attachmentHtml}
+            </div>
+        </body>
+        </html>
+        HTML;
     }
 
-    /**
-     * @param  array{id: int, fileName: string, fileSize: int, mediaType: string, filePath: string}  $attachment
-     */
-    private function buildAttachmentObject(int $pageTypo3Uid, array $attachment): void
+    private function buildBreadcrumb(int $typo3Uid): string
     {
-        $object = $this->createObject('Attachment', $attachment['id']);
+        $crumbs = [];
+        $currentUid = $typo3Uid;
 
-        $this->addProperty($object, 'title', $attachment['fileName']);
-        $this->addProperty($object, 'status', 'current');
-        $this->addProperty($object, 'version', '1', 'int');
-        $this->addProperty($object, 'fileSize', (string) $attachment['fileSize'], 'long');
-        $this->addProperty($object, 'mediaType', $attachment['mediaType']);
-        $this->addProperty($object, 'contentType', $attachment['mediaType']);
-        $this->addProperty($object, 'creationDate', now()->format('Y-m-d H:i:s.v'));
-        $this->addProperty($object, 'lastModificationDate', now()->format('Y-m-d H:i:s.v'));
+        while (isset($this->pages[$currentUid])) {
+            $page = $this->pages[$currentUid];
+            array_unshift($crumbs, $page);
 
-        $this->addIdProperty($object, 'space', $this->spaceId, 'Space');
-        $this->addIdProperty($object, 'container', $this->pages[$pageTypo3Uid]['id'], 'Page');
-    }
-
-    private function createObject(string $class, int $id): DOMElement
-    {
-        $object = $this->doc->createElement('object');
-        $object->setAttribute('class', $class);
-        $object->setAttribute('package', '');
-        $this->root->appendChild($object);
-
-        $idEl = $this->doc->createElement('id');
-        $idEl->setAttribute('name', 'id');
-        $idEl->appendChild($this->doc->createTextNode((string) $id));
-        $object->appendChild($idEl);
-
-        return $object;
-    }
-
-    private function addProperty(DOMElement $parent, string $name, string $value, ?string $type = null): void
-    {
-        $prop = $this->doc->createElement('property');
-        $prop->setAttribute('name', $name);
-        if ($type !== null) {
-            $prop->setAttribute('type', $type);
-        }
-
-        if ($name === 'body') {
-            $prop->appendChild($this->doc->createCDATASection($value));
-        } else {
-            $prop->appendChild($this->doc->createTextNode($value));
-        }
-
-        $parent->appendChild($prop);
-    }
-
-    private function addIdProperty(DOMElement $parent, string $name, int $id, string $class): void
-    {
-        $prop = $this->doc->createElement('property');
-        $prop->setAttribute('name', $name);
-        $prop->setAttribute('class', $class);
-        $prop->setAttribute('package', '');
-
-        $idEl = $this->doc->createElement('id');
-        $idEl->setAttribute('name', 'id');
-        $idEl->appendChild($this->doc->createTextNode((string) $id));
-        $prop->appendChild($idEl);
-
-        $parent->appendChild($prop);
-    }
-
-    private function addCollectionElement(DOMElement $collection, string $class, int $id): void
-    {
-        $element = $this->doc->createElement('element');
-        $element->setAttribute('class', $class);
-        $element->setAttribute('package', '');
-
-        $idProp = $this->doc->createElement('id');
-        $idProp->setAttribute('name', 'id');
-        $idProp->appendChild($this->doc->createTextNode((string) $id));
-        $element->appendChild($idProp);
-
-        $collection->appendChild($element);
-    }
-
-    /**
-     * @return array{id: int, title: string, parentId: int|null, position: int}|null
-     */
-    private function findHomePage(): ?array
-    {
-        foreach ($this->pages as $page) {
-            if ($page['parentId'] === null || $page['parentId'] === 0) {
-                return $page;
+            if ($page['parentId'] === null || ! isset($this->pages[$page['parentId']])) {
+                break;
             }
+            $currentUid = $page['parentId'];
         }
 
-        return null;
+        $html = '<ol>';
+        foreach ($crumbs as $crumb) {
+            $html .= '<li><a href="'.$this->escape($crumb['slug']).'.html">'.$this->escape($crumb['title']).'</a></li>';
+        }
+        $html .= '</ol>';
+
+        return $html;
     }
 
-    private function nextId(): int
+    private function buildAttachmentListHtml(int $typo3Uid, string $pageSlug): string
     {
-        return $this->objectId++;
+        if (! isset($this->attachments[$typo3Uid]) || empty($this->attachments[$typo3Uid])) {
+            return '';
+        }
+
+        $html = "<div id=\"attachments\">\n<h2>Attachments</h2>\n<ul>\n";
+
+        foreach ($this->attachments[$typo3Uid] as $attachment) {
+            $href = 'attachments/'.$this->escape($pageSlug).'/'.$this->escape($attachment['fileName']);
+            $html .= '<li><a href="'.$href.'">'.$this->escape($attachment['fileName']).'</a></li>'."\n";
+        }
+
+        $html .= "</ul>\n</div>\n";
+
+        return $html;
+    }
+
+    private function buildCss(): string
+    {
+        return <<<'CSS'
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 20px; color: #333; }
+        #main-header { border-bottom: 1px solid #ddd; padding-bottom: 10px; margin-bottom: 20px; }
+        #main-header h1 { margin: 0; }
+        #main-header a { text-decoration: none; color: #333; }
+        #breadcrumb-section ol { list-style: none; padding: 0; display: flex; gap: 5px; }
+        #breadcrumb-section ol li:not(:last-child)::after { content: " > "; margin-left: 5px; }
+        #content { max-width: 960px; }
+        .wiki-content { line-height: 1.6; }
+        #attachments { margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; }
+        ul { padding-left: 20px; }
+        a { color: #0052CC; }
+        CSS;
+    }
+
+    private function generateUniqueSlug(string $title, int $uid): string
+    {
+        $slug = Str::slug($title);
+
+        if (empty($slug)) {
+            $slug = 'page-'.$uid;
+        }
+
+        if (isset($this->slugCounts[$slug])) {
+            $this->slugCounts[$slug]++;
+            $slug .= '-'.$this->slugCounts[$slug];
+        } else {
+            $this->slugCounts[$slug] = 1;
+        }
+
+        return $slug;
+    }
+
+    private function escape(string $text): string
+    {
+        return htmlspecialchars($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
     }
 }
