@@ -1,0 +1,48 @@
+FROM php:8.2-cli AS phar-builder
+
+RUN apt-get update && apt-get install -y \
+    git unzip curl libzip-dev \
+    && docker-php-ext-install zip pdo pdo_mysql \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+WORKDIR /app
+COPY . .
+
+RUN composer install --no-dev --optimize-autoloader --no-interaction \
+    && php -d phar.readonly=0 vendor/bin/box compile --no-parallel
+
+# ---
+
+FROM ubuntu:24.04 AS static-builder
+
+RUN apt-get update && apt-get install -y curl xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+ARG TARGETARCH
+ARG PHP_VERSION=8.4
+ARG SPC_EXTENSIONS="phar,pdo,pdo_mysql,mbstring,zlib,dom,xml,simplexml,xmlwriter,xmlreader,tokenizer,filter,ctype,session,pcntl,posix,iconv"
+
+# Download SPC
+RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") \
+    && curl -fSL "https://dl.static-php.dev/static-php-cli/spc-bin/nightly/spc-linux-${ARCH}" -o spc \
+    && chmod +x spc
+
+# Install build dependencies and build micro.sfx
+RUN ./spc doctor --auto-fix || true
+RUN ./spc download --with-php="${PHP_VERSION}" --for-extensions="${SPC_EXTENSIONS}" --prefer-pre-built \
+    && ./spc build "${SPC_EXTENSIONS}" --build-micro
+
+# Combine micro.sfx + PHAR
+COPY --from=phar-builder /app/builds/typo3-to-confluence.phar /build/typo3-to-confluence.phar
+
+RUN cat buildroot/bin/micro.sfx typo3-to-confluence.phar > typo3-to-confluence \
+    && chmod +x typo3-to-confluence
+
+# ---
+
+FROM scratch AS export
+COPY --from=static-builder /build/typo3-to-confluence /typo3-to-confluence

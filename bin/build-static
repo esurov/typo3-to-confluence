@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+#
+# Build a static, self-contained binary for macOS or Linux.
+#
+# Usage:
+#   ./bin/build-static                    # Build for current platform
+#   ./bin/build-static linux-x86_64       # Build for Linux x86_64
+#   ./bin/build-static linux-aarch64      # Build for Linux ARM64
+#   ./bin/build-static macos-x86_64       # Build for macOS x86_64
+#   ./bin/build-static macos-aarch64      # Build for macOS ARM64 (Apple Silicon)
+#   ./bin/build-static all                # Build for all platforms
+#
+# Requirements:
+#   - PHP 8.2+ with phar.readonly=0 (for PHAR build)
+#   - curl
+#   - composer
+#
+
+# Ensure common tool paths are in PATH (needed for SPC to find homebrew, pkg-config, etc.)
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BUILDS_DIR="$PROJECT_DIR/builds"
+SPC_DIR="$PROJECT_DIR/.spc"
+PHP_VERSION="8.4"
+SPC_EXTENSIONS="phar,pdo,pdo_mysql,mbstring,zlib,dom,xml,simplexml,xmlwriter,xmlreader,tokenizer,filter,ctype,session,pcntl,posix,iconv"
+BINARY_NAME="typo3-to-confluence"
+
+# Detect current platform
+detect_platform() {
+    local os arch
+    os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    arch="$(uname -m)"
+
+    case "$os" in
+        darwin) os="macos" ;;
+        linux)  os="linux" ;;
+        *)      echo "Unsupported OS: $os" >&2; exit 1 ;;
+    esac
+
+    case "$arch" in
+        x86_64|amd64)  arch="x86_64" ;;
+        arm64|aarch64) arch="aarch64" ;;
+        *)             echo "Unsupported architecture: $arch" >&2; exit 1 ;;
+    esac
+
+    echo "${os}-${arch}"
+}
+
+# Download the SPC tool for a given platform
+download_spc() {
+    local spc_os spc_arch
+    case "$1" in
+        macos-x86_64)  spc_os="macos"; spc_arch="x86_64" ;;
+        macos-aarch64) spc_os="macos"; spc_arch="aarch64" ;;
+        linux-x86_64)  spc_os="linux"; spc_arch="x86_64" ;;
+        linux-aarch64) spc_os="linux"; spc_arch="aarch64" ;;
+    esac
+
+    local spc_bin="$SPC_DIR/spc-$1"
+    if [[ -f "$spc_bin" ]]; then
+        echo "  SPC already downloaded for $1"
+        return
+    fi
+
+    mkdir -p "$SPC_DIR"
+    # SPC download URLs use the same naming: spc-{macos|linux}-{x86_64|aarch64}
+    local url="https://dl.static-php.dev/static-php-cli/spc-bin/nightly/spc-${spc_os}-${spc_arch}"
+    echo "  Downloading SPC for $1 from $url ..."
+    curl --fail --location --retry 3 --retry-delay 2 -o "$spc_bin" "$url"
+    chmod +x "$spc_bin"
+}
+
+# Download PHP source and extension libraries, then build micro.sfx
+build_micro() {
+    local target="$1"
+    local spc_bin="$SPC_DIR/spc-$target"
+    local work_dir="$SPC_DIR/work-$target"
+
+    local micro_sfx="$work_dir/buildroot/bin/micro.sfx"
+    if [[ -f "$micro_sfx" ]]; then
+        echo "  micro.sfx already built for $target"
+        return
+    fi
+
+    mkdir -p "$work_dir"
+
+    echo "  Checking build dependencies for $target..."
+    (cd "$work_dir" && "$spc_bin" doctor --auto-fix) || true
+
+    echo "  Downloading PHP sources and libraries for $target..."
+    (cd "$work_dir" && "$spc_bin" download --with-php="$PHP_VERSION" --for-extensions="$SPC_EXTENSIONS" --prefer-pre-built)
+
+    echo "  Building micro.sfx for $target (this may take a few minutes)..."
+    (cd "$work_dir" && "$spc_bin" build "$SPC_EXTENSIONS" --build-micro)
+}
+
+# Combine micro.sfx + PHAR into a static binary
+combine() {
+    local target="$1"
+    local micro_sfx="$SPC_DIR/work-$target/buildroot/bin/micro.sfx"
+    local phar="$BUILDS_DIR/$BINARY_NAME.phar"
+    local output="$BUILDS_DIR/$BINARY_NAME-$target"
+
+    if [[ ! -f "$micro_sfx" ]]; then
+        echo "Error: micro.sfx not found for $target" >&2
+        exit 1
+    fi
+    if [[ ! -f "$phar" ]]; then
+        echo "Error: PHAR not found at $phar. Run 'composer build' first." >&2
+        exit 1
+    fi
+
+    echo "  Combining micro.sfx + PHAR -> $output"
+    cat "$micro_sfx" "$phar" > "$output"
+    chmod +x "$output"
+
+    local size
+    size="$(du -h "$output" | cut -f1 | xargs)"
+    echo "  Built: $output ($size)"
+}
+
+# Build for a single target
+build_target() {
+    local target="$1"
+    echo ""
+    echo "==> Building for $target"
+
+    # SPC can only build for the current platform natively
+    local current
+    current="$(detect_platform)"
+    local current_os="${current%-*}"
+    local target_os="${target%-*}"
+
+    if [[ "$current" != "$target" && "$current_os" != "$target_os" ]]; then
+        echo "  Cross-OS compilation not supported natively."
+        echo "  To build for $target_os, run this script on a $target_os machine or use Docker:"
+        echo ""
+        echo "    docker run --rm -v \"\$(pwd)\":/app -w /app php:8.2-cli bash bin/build-static $target"
+        echo ""
+        return 1
+    fi
+
+    download_spc "$target"
+    build_micro "$target"
+    combine "$target"
+}
+
+# Build the PHAR if it doesn't exist
+ensure_phar() {
+    if [[ ! -f "$BUILDS_DIR/$BINARY_NAME.phar" ]]; then
+        echo "==> Building PHAR first..."
+        (cd "$PROJECT_DIR" && composer build)
+    fi
+}
+
+# Main
+main() {
+    local targets=()
+
+    if [[ $# -eq 0 ]]; then
+        targets=("$(detect_platform)")
+    elif [[ "$1" == "all" ]]; then
+        targets=("macos-x86_64" "macos-aarch64" "linux-x86_64" "linux-aarch64")
+    else
+        targets=("$@")
+    fi
+
+    echo "Static binary builder for $BINARY_NAME"
+    echo "Targets: ${targets[*]}"
+
+    ensure_phar
+
+    local failed=()
+    for target in "${targets[@]}"; do
+        if ! build_target "$target"; then
+            failed+=("$target")
+        fi
+    done
+
+    echo ""
+    echo "==> Done!"
+    echo ""
+    ls -lh "$BUILDS_DIR/$BINARY_NAME"* 2>/dev/null || true
+
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        echo ""
+        echo "Warning: Failed to build for: ${failed[*]}"
+        exit 1
+    fi
+}
+
+main "$@"

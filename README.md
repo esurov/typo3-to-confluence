@@ -50,6 +50,55 @@ Note: building requires `phar.readonly=0` in your php.ini, or run the build step
 php -d phar.readonly=0 vendor/bin/box compile
 ```
 
+## Quick Start (Static Binary)
+
+Static binaries require no PHP installation. Download or build the binary for your platform and run directly:
+
+```bash
+./typo3-to-confluence-linux-x86_64 \
+  --db-host=127.0.0.1 \
+  --db-name=typo3 \
+  --db-user=root \
+  --db-password=secret \
+  --fileadmin=/var/www/html/fileadmin \
+  --output=/tmp
+```
+
+## Building Static Binaries
+
+Build a static binary for the current platform:
+
+```bash
+make static
+```
+
+Build for a specific platform (must match the host OS):
+
+```bash
+make static-macos-arm64    # macOS Apple Silicon
+make static-macos          # macOS x86_64
+make static-linux          # Linux x86_64
+make static-linux-arm64    # Linux ARM64
+make static-all            # All platforms (same OS only)
+```
+
+Build Linux binaries from macOS using Docker:
+
+```bash
+make docker-linux           # Linux x86_64
+make docker-linux-arm64     # Linux ARM64
+```
+
+Static binaries are written to the `builds/` directory.
+
+### Requirements for Static Builds
+
+- PHP 8.2+ with `phar.readonly=0` (for the PHAR build step)
+- curl
+- composer
+- On macOS: Xcode Command Line Tools, homebrew (for bison, re2c)
+- For Docker builds: Docker with BuildKit
+
 ## Development Usage
 
 ```bash
