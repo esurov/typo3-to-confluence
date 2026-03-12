@@ -24,7 +24,7 @@ WORKDIR /build
 
 ARG TARGETARCH
 ARG PHP_VERSION=8.4
-ARG SPC_EXTENSIONS="phar,pdo,pdo_mysql,mbstring,zlib,dom,xml,simplexml,xmlwriter,xmlreader,tokenizer,filter,ctype,session,pcntl,posix,iconv"
+ARG SPC_EXTENSIONS="phar,pdo,pdo_mysql,mbstring,zlib,zip,dom,xml,simplexml,xmlwriter,xmlreader,tokenizer,filter,ctype,session,pcntl,posix,iconv"
 
 # Download SPC
 RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") \
