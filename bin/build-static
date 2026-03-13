@@ -25,7 +25,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILDS_DIR="$PROJECT_DIR/builds"
 SPC_DIR="$PROJECT_DIR/.spc"
 PHP_VERSION="8.4"
-SPC_EXTENSIONS="phar,pdo,pdo_mysql,mbstring,zlib,dom,xml,simplexml,xmlwriter,xmlreader,tokenizer,filter,ctype,session,pcntl,posix,iconv"
+SPC_EXTENSIONS="phar,pdo,pdo_mysql,mbstring,zlib,zip,dom,xml,simplexml,xmlwriter,xmlreader,tokenizer,filter,ctype,session,pcntl,posix,iconv"
 BINARY_NAME="typo3-to-confluence"
 
 # Detect current platform
